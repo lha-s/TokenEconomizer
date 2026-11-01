@@ -397,6 +397,20 @@ repository is not used by Codex there), while settings are shared by every agent
   each mode: [When a turn gets stuck](../README.md#when-a-turn-gets-stuck).
 - **Cost.** `status` shows each session's tokens, priced after it ends, and the plugin's own
   overhead: the loop guard's judge, and micro-skills' proposer when it is on.
+- **Earlier sessions** (Claude Code). The first session start in a repository also learns from
+  the sessions Claude Code ran there before the plugin was installed: its own logs under
+  `~/.claude/projects/` (or `$CLAUDE_CONFIG_DIR/projects/`), from any clone or worktree of the
+  repository, the newest `backfill_max_sessions` (200), folded oldest first in the background,
+  with no model call. Claude Code keeps those logs for `cleanupPeriodDays` (30 by default), so
+  that is as far back as it reaches. They feed the facts, the deny list's evidence and the loop
+  guard's envelope; they are scored only against the tools their own logs show, and under
+  `toolprune=auto` a tool whose evidence comes from them waits for `toolprune apply` until the
+  plugin's own sessions back it (`toolprune` and the session start say so). It runs only where
+  nothing was folded yet, so learning stays in time order; a session that ends while it runs is
+  folded after it, at the next session start. The next session start says how many were
+  imported; `status` counts them apart. Left out: one-prompt `claude -p` runs, sessions with no
+  prompt, and logs written in the last ten minutes. `backfill=off` turns it off; `backfill
+  --dry-run` lists what it would import.
 
 ## Commands
 
@@ -416,6 +430,7 @@ repository is not used by Codex there), while settings are shared by every agent
 | `repos` | every repository it keeps state for: how it was identified, its sessions per agent, the checkouts seen |
 | `repos migrate` | file state an earlier version recorded under the repository it belongs to (runs by itself, once, after an upgrade) |
 | `repos merge KEY [INTO]` | merge one repository's state into another's (default: this one), for state whose checkouts are gone |
+| `backfill [--dry-run \| --status]` | learn from the sessions Claude Code ran in this repository before the plugin was installed (runs by itself at its first session start; `--dry-run` lists them, nothing written) |
 | `doctor` | check Python, the state directory, the agents found, how this directory was identified, and the error log |
 
 How to run them:
@@ -428,7 +443,7 @@ How to run them:
 | Pi | `/te <command>` | `~/.tokeneconomizer/bin/te --host pi <command>` |
 | opencode | none (run from a terminal) | `~/.tokeneconomizer/bin/te --host opencode <command>` |
 
-`doctor` and `repomap` run from a terminal (or as `/te …` on Pi); there is no slash command or
+`doctor`, `repomap` and `backfill` run from a terminal (or as `/te …` on Pi); there is no slash command or
 Codex skill for them.
 
 Inside an agent, each command is one model turn; from a terminal it costs nothing. Codex asks
@@ -489,6 +504,8 @@ and are shared by every agent working in it. The examples use Claude Code's form
 | `toolprune_sessions` | `5` | or this many sessions, however few prompts they ran |
 | `toolprune_quiet_minutes` | `60` | how long the repository's sessions must have been idle before `auto` writes a deny list, so that no conversation resumed while its prompt cache is warm loses it (a list is written at the latest a day after it formed); `0` writes at once |
 | `toolprune_protect` | none | tools never left out however long they go unused, by name or pattern (`mcp__headroom__*`), separated by commas; a deny rule the plugin added for one is removed at the next fold, and rules you wrote are never touched |
+| `backfill` | `on` | at a repository's first session start, learn from the sessions Claude Code ran there before the plugin was installed (see [What to expect](#what-to-expect)); `off` skips it |
+| `backfill_max_sessions` | `200` | how many of those earlier sessions, the newest; `0` for all |
 | `loopguard_aggr` | `default` | the guard's threshold preset: `conservative`, `default` or `aggressive` |
 | `loopguard_nudges` | `1` | redirects per turn before the guard only tells you |
 | `loopguard.<name>` | from the preset | one guard threshold, set by hand (below) |

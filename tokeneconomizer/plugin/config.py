@@ -48,7 +48,12 @@ person can tune by hand:
   * repomap, repomap_tokens, repomap_python, repomap_timeout -- the opt-in repository map;
   * pi_extensions, pi_cli       -- on Pi, the extensions the plugin's own model calls load (a
                                    custom provider's, whose model they could not reach otherwise;
-                                   comma-separated paths), and the `pi` they run.
+                                   comma-separated paths), and the `pi` they run;
+  * backfill, backfill_max_sessions -- at a repository's first session start, learn from the
+                                   sessions Claude Code ran there before the plugin was installed
+                                   (its own logs under `~/.claude/projects`), the newest
+                                   `backfill_max_sessions` of them (0: all), oldest first, with no
+                                   model call; on by default (see `plugin/backfill.py`).
 
 The names before the mechanisms were renamed are read too, so an existing config file keeps
 working: `inject` (microskills), `untool` (toolprune), `spiral` (loopguard), with their
@@ -168,13 +173,15 @@ class LiveConfig:
     pi_cli: str = ""
     shadow: bool = False
     vocabulary: str = "auto"
+    backfill: bool = True
+    backfill_max_sessions: int = 200
     warnings: list = field(default_factory=list)
 
     _CHOICES = {"mode": MODES, "microskills": MICROSKILLS, "toolprune": TOOLPRUNE,
                 "loopguard": LOOPGUARD, "repomap": REPOMAP, "loopguard_aggr": AGGR,
                 "vocabulary": ("auto", "generic", "python-git", "node-web")}
     # The smallest value a number setting takes, where it is not 1.
-    _MIN = {"toolprune_quiet_minutes": 0}
+    _MIN = {"toolprune_quiet_minutes": 0, "backfill_max_sessions": 0}
 
     def as_dict(self):
         d = asdict(self)
@@ -276,7 +283,8 @@ _ENV = {"TE_MODE": "mode", "TE_SHADOW": "shadow",
         "TE_LOOPGUARD_NUDGES": "loopguard_nudges",
         "TE_REPOMAP": "repomap", "TE_REPOMAP_TOKENS": "repomap_tokens",
         "TE_REPOMAP_PYTHON": "repomap_python", "TE_REPOMAP_TIMEOUT": "repomap_timeout",
-        "TE_PI_EXTENSIONS": "pi_extensions", "TE_PI_CLI": "pi_cli"}
+        "TE_PI_EXTENSIONS": "pi_extensions", "TE_PI_CLI": "pi_cli",
+        "TE_BACKFILL": "backfill", "TE_BACKFILL_MAX_SESSIONS": "backfill_max_sessions"}
 _ENV_THRESHOLDS = ("TE_SPIRAL_THRESHOLDS", "TE_LOOPGUARD_THRESHOLDS")
 
 

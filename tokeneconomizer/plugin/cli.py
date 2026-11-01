@@ -24,6 +24,10 @@
                                       now (runs by itself, once, after an upgrade)
     te repos merge KEY [INTO]         merge the state directory KEY into INTO (default: this
                                       repository's), for state whose checkouts are gone
+    te backfill [--dry-run | --status]
+                                      learn from the sessions Claude Code ran in this
+                                      repository before the plugin was installed (runs by
+                                      itself at its first session start; `--dry-run` lists them)
     te doctor                         check the installation
     te --host copilot probe           real Copilot sessions in a throwaway repository: does a
                                       learned fact change what the model does, and what does the
@@ -42,7 +46,8 @@ import sys
 import time
 
 from .. import loopguard
-from . import accounting, denylist, fold, hosts, paths, repomap, repos, sidecall, toolcheck
+from . import (accounting, backfill, denylist, fold, hosts, paths, repomap, repos, sidecall,
+               toolcheck)
 from .config import canonical, unset_config, write_config
 from .context import LiveContext
 from .paths import state_root
@@ -121,16 +126,20 @@ def cmd_status(args):
         "microskills": {"profile": cfg.microskills,
                         "injected_lines": sum(1 for ln in (inj.get("rendered") or "").splitlines()
                                               if ln.startswith("- ")),
-                        "sessions_folded": inj.get("sessions", 0)},
+                        "sessions_folded": inj.get("sessions", 0),
+                        "imported_sessions": inj.get("imported_sessions", 0)},
         "toolprune": {"mode": cfg.toolprune, "sessions": unt.get("sessions", 0),
+                      "imported_sessions": unt.get("imported_sessions", 0),
                       "prompts": unt.get("prompts", 0),
+                      "waiting_for_apply": unt.get("history_proposal", []),
                       "catalog_source": unt.get("catalog_source"),
                       "proposal": unt.get("proposal", []),
                       "applied": denylist.applied_for(ctx.store, ctx.repo.root,
                                                       ctx.host.name)},
         "loopguard": {"mode": cfg.loopguard, "envelope": env_tracker.envelope,
                       "ended_green_turns": len(env_tracker.resolved_turns)},
-        "ledger": ledger})
+        "ledger": ledger,
+        "backfill": {k: v for k, v in backfill.status(ctx.store).items() if k != "plan"}})
     if args.json:
         print(json.dumps(out, indent=2, default=str))
         return 0
@@ -154,24 +163,48 @@ def cmd_status(args):
           f"{accounting.fmt_tokens(ledger['effective_tokens'])} effective tokens, plugin "
           f"overhead {accounting.fmt_tokens(ledger['overhead_tokens'])} "
           f"({ledger['overhead_frac']:.1%})")
+    if ledger["imported_sessions"] or out["backfill"]:
+        print(f"  history      {_backfill_line(out['backfill'], ledger)}")
     i = out["microskills"]
     print(f"  microskills  {i['injected_lines']} fact(s) injected at session start "
-          f"({i['sessions_folded']} sessions learned from)")
+          f"({i['sessions_folded']} sessions learned from"
+          + (f", {i['imported_sessions']} of them imported" if i["imported_sessions"] else "")
+          + ")")
     u = out["toolprune"]
     if not denylist.supports(ctx.host.name):
         print("  toolprune    not available on this host")
     else:
         src = u["catalog_source"] or "none yet"
-        print(f"  toolprune    {u['sessions']} sessions ({u['prompts']} prompts) observed, "
-              f"catalog: {src}; "
+        print(f"  toolprune    {u['sessions']} sessions ({u['prompts']} prompts) observed"
+              + (f" ({u['imported_sessions']} imported)" if u["imported_sessions"] else "")
+              + f", catalog: {src}; "
               f"proposed {denylist.unit(ctx.host.name, plural=True)}: "
-              f"{', '.join(u['proposal']) or '-'}; applied: {', '.join(u['applied']) or '-'}")
+              f"{', '.join(u['proposal']) or '-'}; applied: {', '.join(u['applied']) or '-'}"
+              + (f"; waiting for `toolprune apply` (evidence from before the plugin): "
+                 f"{', '.join(u['waiting_for_apply'])}" if u["waiting_for_apply"] else ""))
     sp = out["loopguard"]
     env_s = f"{sp['envelope']:.0f} tool calls" if sp["envelope"] else "not learned yet"
     print(f"  loopguard    envelope {env_s} ({sp['ended_green_turns']} ended-green turns); "
           f"{ledger['nudges']} redirect(s), {ledger['aborts']} still-stuck notice(s) over "
           f"{ledger['turns']} turns")
     return 0
+
+
+def _backfill_line(st, ledger):
+    """What `te status` says about the sessions imported from the agent's history."""
+    n = ledger["imported_sessions"]
+    state = st.get("state")
+    if state in ("queued", "running"):
+        return (f"importing the sessions that ran before the plugin: {st.get('folded', 0)} of "
+                f"{st.get('planned', '?')} so far")
+    if state == "skipped":
+        return f"earlier sessions not imported: {st.get('reason')}"
+    span = (f", {time.strftime('%Y-%m-%d', time.localtime(st['first']))} to "
+            f"{time.strftime('%Y-%m-%d', time.localtime(st['last']))}"
+            if st.get("first") and st.get("last") else "")
+    return (f"{n} session(s) from before the plugin imported{span} "
+            f"({accounting.fmt_tokens(ledger['imported_effective_tokens'])} effective tokens, "
+            f"not in the totals above)")
 
 
 def cmd_microskills(args):
@@ -204,6 +237,11 @@ def _toolprune_show(ctx, unt):
           f"{denylist.settings_path(ctx.repo.root, host)}): "
           f"{', '.join(denylist.applied_for(ctx.store, ctx.repo.root, host)) or '-'}")
     print(f"proposed: {', '.join(_proposal(ctx, unt)) or '-'}")
+    waiting = [t for t in unt.get("history_proposal") or [] if t in _proposal(ctx, unt)]
+    if waiting and ctx.config.toolprune == "auto":
+        print(f"waiting for `toolprune apply`: {', '.join(waiting)} -- unused in the sessions "
+              f"imported from before the plugin, and not yet in enough sessions since, so "
+              f"`auto` leaves them to you")
     pending = [t for t in (unt.get("auto_pending") or {}).get("items") or []
                if t in _proposal(ctx, unt)]
     if pending and ctx.config.toolprune == "auto":
@@ -513,6 +551,55 @@ def cmd_fold(args):
     return 0
 
 
+def cmd_backfill(args):
+    """`te backfill`: import this repository's earlier sessions from the agent's own history
+    (`plugin/backfill.py`); the first session start runs it by itself."""
+    ctx = _ctx(args)
+    st = backfill.status(ctx.store)
+    if args.status:
+        print(json.dumps({k: v for k, v in st.items() if k != "plan"}, indent=2,
+                         sort_keys=True, default=str))
+        return 0
+    if not ctx.host.has_history:
+        print(f"not available on {ctx.host.name}: only Claude Code's history is read so far")
+        return 2
+    if args.dry_run:
+        items, skipped = backfill.plan(ctx)
+        for it in items:
+            print(f"  {_when(it['started'])}  {it['prompts']:4d} prompt(s)  {it['session_id']}")
+        print(f"{len(items)} session(s) would be imported, oldest first"
+              + ("; left out: " + ", ".join(f"{n} {why}" for why, n in sorted(skipped.items()))
+                 if skipped else ""))
+        return 0
+    live = backfill.live_folds(ctx.store)
+    if live:
+        print(f"not run: {backfill._refusal(len(live))}.")
+        return 1
+    if st.get("state") in ("done", "skipped"):
+        print(f"already run here ({st['state']}"
+              + (f": {st.get('folded', 0)} session(s) imported" if st["state"] == "done"
+                 else f": {st.get('reason')}") + "); `te backfill --status` has the details")
+        return 0
+    if _refuse_unwritable(ctx.store.base):
+        return 1
+    res = backfill.run(ctx)
+    if args.quiet:
+        return 0
+    if res.get("state") == "busy":
+        print("a fold or another import holds this repository's state; try again in a few "
+              "minutes")
+        return 1
+    if res.get("state") == "skipped":
+        print(f"not run: {res.get('reason')}.")
+        return 1
+    print(f"imported {res.get('folded', 0)} of {res.get('planned', 0)} earlier session(s)"
+          + (f", {res['errors']} unreadable" if res.get("errors") else "")
+          + (f"; left out: " + ", ".join(f"{n} {why}" for why, n in
+                                         sorted((res.get("skipped") or {}).items()))
+             if res.get("skipped") else ""))
+    return 0
+
+
 def cmd_judge(args):
     """The detached half of the stuck judge (see plugin/judge.py); not for people."""
     from . import judge
@@ -740,6 +827,11 @@ def build_parser():
     p.add_argument("--session", required=True)
     p.add_argument("--job", required=True)
     p.set_defaults(fn=cmd_judge)
+    p = add("backfill")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--status", action="store_true")
+    p.add_argument("--quiet", action="store_true")
+    p.set_defaults(fn=cmd_backfill)
     add("doctor").set_defaults(fn=cmd_doctor)
     p = add("repos")
     p.add_argument("action", nargs="?", default="list", choices=("list", "migrate", "merge"))

@@ -2,6 +2,8 @@
 
     SessionStart      inject the repository's micro-skills (cached by the last fold), and
                       fold any earlier session that ended without its SessionEnd being seen;
+                      the first time in a repository, import the sessions the agent ran there
+                      before the plugin was installed, in the background (`backfill`);
                       with `repomap` on, refresh a stale map in the background
     UserPromptSubmit  open a prompt-turn for the loop guard; on a session's first prompt, add
                       the repository map (`repomap=on`)
@@ -24,7 +26,7 @@ import os
 import time
 
 from .. import loopguard
-from . import denylist, fold, repomap, repos, sidecall
+from . import backfill, denylist, fold, repomap, repos, sidecall
 from .hosts import merge_outputs
 from .paths import ensure_launcher
 
@@ -153,6 +155,12 @@ class LiveController:
         note = repos.migration_notice(self.ctx.root, self._cmd("repos"))
         if note and not self.cfg.shadow:
             outputs.append(self.host.notice(note))
+        try:
+            note = backfill.notice(self.ctx, self._cmd("status"))
+            if note and not self.cfg.shadow:
+                outputs.append(self.host.notice(note))
+        except Exception:
+            backfill._record_error(self.ctx.env)
 
         if self.cfg.repomap != "off":
             if repomap.stale(self.ctx):
@@ -170,6 +178,11 @@ class LiveController:
         repos.prune_pins(self.ctx.root, self.host.name)
         repos.start_migration(self.ctx)
         fold.spawn_fold(self.ctx, fold.pending_sessions(self.ctx, exclude=(self.sid,)))
+        try:
+            # After this session's record is saved, so the import leaves it to the live path.
+            backfill.start(self.ctx)
+        except Exception:
+            backfill._record_error(self.ctx.env)
         return merge_outputs(*outputs)
 
     def _toolprune_notices(self, seen):
@@ -202,9 +215,11 @@ class LiveController:
         prop = [t for t in unt.get("proposal") or [] if t not in mine and t not in kept]
         refused = unt.get("auto_apply_refused") if self.cfg.toolprune == "auto" else None
         # Under `auto`, a list waiting for the repository to go quiet is no news yet: the
-        # session start after it is written says so (above). Only a refusal is.
+        # session start after it is written says so (above). Only a refusal is, and what rests
+        # on sessions imported from before the plugin, which `auto` never writes by itself.
         if self.cfg.toolprune == "auto" and not refused:
-            prop = []
+            waiting = set(unt.get("history_proposal") or ())
+            prop = [t for t in prop if t in waiting]
         if prop and seen.get("untool") != ",".join(prop):
             out.append(self.host.notice(
                 f"TokenEconomizer: {len(prop)} {unit}(s) went unused in this repository's recent "

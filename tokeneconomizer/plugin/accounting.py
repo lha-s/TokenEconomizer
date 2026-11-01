@@ -31,7 +31,11 @@ def overhead_total(overhead):
 
 
 def summarize(records):
-    """Aggregate ledger records into the numbers `te status` prints."""
+    """Aggregate ledger records into the numbers `te status` prints. Sessions imported from the
+    agent's history (`backfill`) ran without the plugin, so they are counted apart
+    (`imported_*`) and stay out of every other total."""
+    imported = [r for r in records if r.get("kind") == "session" and r.get("imported")]
+    records = [r for r in records if not r.get("imported")]
     sessions = [r for r in records if r.get("kind") == "session"]
     priced = [r for r in sessions if isinstance(r.get("effective_tokens"), (int, float))]
     exec_total = sum(r["effective_tokens"] for r in priced)
@@ -50,6 +54,9 @@ def summarize(records):
         "aborts": sum(int(r.get("aborts") or 0) for r in sessions),
         "turns": sum(int(r.get("turns") or 0) for r in sessions),
         "injected_sessions": sum(1 for r in sessions if r.get("injected_chars")),
+        "imported_sessions": len(imported),
+        "imported_effective_tokens": sum(r["effective_tokens"] for r in imported
+                                         if isinstance(r.get("effective_tokens"), (int, float))),
     }
 
 

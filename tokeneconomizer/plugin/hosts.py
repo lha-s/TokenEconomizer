@@ -190,6 +190,23 @@ class Host:
     def tool_usage(self, trace_path):
         return trace.tool_usage(trace_path)
 
+    # -- the sessions the agent ran before the plugin saw any (`backfill`) -----------------
+    # Whether this host's own history of earlier sessions can be read (`history`, `turns`).
+    has_history = False
+
+    def history(self, env):
+        """Paths of every session log the agent itself still keeps."""
+        return []
+
+    def session_meta(self, transcript_path):
+        """{cwd, started, entrypoint} of a session log (any may be None)."""
+        return {"cwd": None, "started": None, "entrypoint": None}
+
+    def turns(self, transcript_path):
+        """[(calls, ended_normally)] for the session's prompt-turns, each call
+        `(name, args, result_text, exit_code_or_None)`; None where the log does not say."""
+        return None
+
 
 def _failure_response(p):
     """A PostToolUseFailure payload's `error` as a response; None for any other payload. A
@@ -257,6 +274,17 @@ class ClaudeCode(Host):
 
     def tool_usage(self, trace_path):
         return trace.claude_tool_usage(os.path.realpath(trace_path))
+
+    has_history = True
+
+    def history(self, env):
+        return trace.claude_history(env)
+
+    def session_meta(self, transcript_path):
+        return trace.claude_session_meta(transcript_path)
+
+    def turns(self, transcript_path):
+        return trace.claude_turns(transcript_path)
 
 
 _CODEX_SHELL = {"bash", "shell", "exec_command", "local_shell", "unified_exec",

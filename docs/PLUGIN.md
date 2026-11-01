@@ -13,7 +13,7 @@ the hooks run) and `plugin/` (the packaging for each agent). To install and use 
 
 | Hook | What the plugin does | Mechanism it drives |
 |---|---|---|
-| `SessionStart` | Injects the repository's micro-skills (a cached render) as `additionalContext`, at a new start, and on a Copilot resume the text that session started with (§3); announces changed facts, tools the deny list newly left out, or, under `toolprune=propose` (or when `auto` could not write the file), a proposal still waiting, each in one `systemMessage` line; folds any earlier session whose end was never seen | microskills |
+| `SessionStart` | Injects the repository's micro-skills (a cached render) as `additionalContext`, at a new start, and on a Copilot resume the text that session started with (§3); announces changed facts, tools the deny list newly left out, or, under `toolprune=propose` (or when `auto` could not write the file), a proposal still waiting, each in one `systemMessage` line; folds any earlier session whose end was never seen; the first time in a repository, starts a detached `te backfill` that folds the sessions Claude Code logged there before the plugin was installed (`plugin/backfill.py`) | microskills |
 | `UserPromptSubmit` | Opens a prompt-turn for the loop guard | loopguard |
 | `PostToolUse` | Folds the call into the turn's guard; delivers a redirect as `additionalContext`, then, if the turn is still stuck, a one-line notice to the person (on Claude Code, also as context asking the model to repeat it); never stops the turn | loopguard |
 | `PostToolUseFailure` | The same, for a call that failed (Claude Code and Copilot report a failed call only here); the answer names this event, as Claude Code requires | loopguard |

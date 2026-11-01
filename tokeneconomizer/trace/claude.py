@@ -13,6 +13,8 @@ and results included; read as calls, every call counted twice.
 import glob
 import json
 import os
+import re
+from datetime import datetime
 
 from .jsonl import lines as _lines
 
@@ -149,6 +151,165 @@ def claude_tool_usage(transcript_path, include_subagents=True):
         for name, n in tool_usage(path).items():
             counts[name] = counts.get(name, 0) + n
     return counts
+
+
+# ---- the history Claude Code keeps of earlier sessions --------------------------------------
+def claude_projects_dir(env=None):
+    """`<config dir>/projects`, where Claude Code files every session's log by the directory it
+    started in: `CLAUDE_CONFIG_DIR` when set (in `env`, else this process's environment), else
+    `~/.claude`."""
+    env = os.environ if env is None else env
+    base = env.get("CLAUDE_CONFIG_DIR") or os.environ.get("CLAUDE_CONFIG_DIR")
+    if not base:
+        home = env.get("HOME") or os.path.expanduser("~")
+        base = os.path.join(home, ".claude")
+    return os.path.join(base, "projects")
+
+
+def claude_history(env=None):
+    """Every session log Claude Code still keeps: `projects/<folder>/<session id>.jsonl`. A
+    session's subagents write under `<folder>/<session id>/subagents/` and stay with it."""
+    root = claude_projects_dir(env)
+    try:
+        folders = sorted(os.listdir(root))
+    except OSError:
+        return []
+    out = []
+    for folder in folders:
+        d = os.path.join(root, folder)
+        try:
+            names = sorted(os.listdir(d))
+        except OSError:
+            continue
+        out.extend(os.path.join(d, n) for n in names
+                   if n.endswith(".jsonl") and os.path.isfile(os.path.join(d, n)))
+    return out
+
+
+def project_folder_name(path):
+    """The folder name Claude Code files a directory's sessions under: every character that is
+    not a letter or a digit becomes `-` (`/Users/me/a.b` -> `-Users-me-a-b`)."""
+    return re.sub(r"[^A-Za-z0-9]", "-", path or "")
+
+
+def _epoch(stamp):
+    if not isinstance(stamp, str) or not stamp:
+        return None
+    try:
+        return datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def claude_session_meta(transcript_path, head_bytes=1 << 20):
+    """{cwd, started, entrypoint} of a session log, from its first entries that name them:
+    the directory it started in, when (epoch seconds) and from which front end (`cli`, or
+    `sdk-*` for `claude -p` and the SDKs). Any of them may be None."""
+    meta: dict = {"cwd": None, "started": None, "entrypoint": None}
+    read = 0
+    try:
+        with open(transcript_path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                read += len(line)
+                if read > head_bytes:
+                    break
+                if '"cwd"' not in line and '"timestamp"' not in line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(ev, dict):
+                    continue
+                if meta["cwd"] is None and isinstance(ev.get("cwd"), str) and ev["cwd"]:
+                    meta["cwd"] = ev["cwd"]
+                if meta["started"] is None:
+                    meta["started"] = _epoch(ev.get("timestamp"))
+                if meta["entrypoint"] is None and isinstance(ev.get("entrypoint"), str):
+                    meta["entrypoint"] = ev["entrypoint"]
+                if all(v is not None for v in meta.values()):
+                    break
+    except OSError:
+        pass
+    return meta
+
+
+_EXIT_RE = re.compile(r"(?im)^\s*(?:exit code|process exited with code)[:\s]+(-?\d+)")
+_RESULT_CAP = 20000
+
+
+def claude_turns(transcript_path):
+    """The session's prompt-turns, as the loop guard's hooks would have seen them live:
+    [(calls, ended_normally)], each call `(name, args, result_text, exit_code_or_None)`.
+
+    A turn runs from one prompt the person gave (`_is_prompt`) to the next; a turn the person
+    interrupted (`[Request interrupted ...`) did not end normally, nor did the session's last
+    turn when its log stops on a tool call with no result. Subagents' calls are left out, as
+    the live guard leaves them out. A failed call's exit code is read from its result text, the
+    way the PostToolUseFailure hook reports it; a successful call has none."""
+    turns = []
+    cur = None                          # {"order": [ids], "calls": {id: ...}, "ok": bool}
+    seen = set()
+
+    def close():
+        if cur is not None and cur["order"]:
+            calls = []
+            for tid in cur["order"]:
+                c = cur["calls"][tid]
+                if c.get("result") is None:
+                    cur["ok"] = False   # a call that never returned: the turn was cut off
+                    continue
+                calls.append((c["name"], c["args"], c["result"], c.get("code")))
+            turns.append((calls, cur["ok"]))
+
+    for line in _lines(transcript_path):
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(ev, dict) or ev.get("type") not in CONVERSATION \
+                or ev.get("isSidechain"):
+            continue
+        if _is_prompt(ev):
+            close()
+            cur = {"order": [], "calls": {}, "ok": True}
+            continue
+        content = (ev.get("message") or {}).get("content")
+        if ev.get("type") == "user":
+            text = content if isinstance(content, str) else " ".join(
+                b.get("text") or "" for b in content or () if isinstance(b, dict)
+                and b.get("type") == "text")
+            if isinstance(text, str) and text.startswith("[Request interrupted") \
+                    and cur is not None:
+                cur["ok"] = False
+        if cur is None or not isinstance(content, list):
+            continue
+        for b in content:
+            if not isinstance(b, dict):
+                continue
+            if b.get("type") == "tool_use":
+                tid = b.get("id")
+                if not tid or tid in seen:
+                    continue
+                seen.add(tid)
+                cur["order"].append(tid)
+                cur["calls"][tid] = {"name": str(b.get("name") or ""),
+                                     "args": b.get("input") if isinstance(b.get("input"), dict)
+                                     else {}, "result": None}
+            elif b.get("type") == "tool_result":
+                c = cur["calls"].get(b.get("tool_use_id"))
+                if c is None or c["result"] is not None:
+                    continue
+                res = b.get("content")
+                if isinstance(res, list):
+                    res = " ".join(x.get("text", "") for x in res if isinstance(x, dict))
+                res = (res if isinstance(res, str) else "")[:_RESULT_CAP]
+                c["result"] = res
+                if b.get("is_error"):
+                    m = _EXIT_RE.search(res[:400])
+                    c["code"] = int(m.group(1)) if m else None
+    close()
+    return turns
 
 
 def claude_deferred_tools(transcript_path):

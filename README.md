@@ -71,6 +71,11 @@ installed. Its model calls (the fact proposer, and the judge with the redirect i
 through your own agent, on the same plan or login, and their cost is included in its reports.
 What it learns stays on your machine, in `~/.tokeneconomizer`.
 
+On Claude Code it does not start from nothing: the first session in a repository also learns
+from the sessions Claude Code already logged there before the plugin was installed
+(`~/.claude/projects/`), oldest first, in the background and with no model call, and then keeps
+learning from every session after it ([Earlier sessions](plugin/README.md#what-to-expect)).
+
 ## Results
 
 The paper ran five agent–model combinations on the same 277 SWE-Bench tasks from six repositories.

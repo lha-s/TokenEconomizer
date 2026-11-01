@@ -135,6 +135,34 @@ def _say_missing(plugin_root):
         pass
 
 
+def _newer_python():
+    """A Python >= MIN_VERSION on PATH under a versioned name (`python3.14`, ...), for a PATH
+    whose first `python3` is older: macOS puts its own `/usr/bin/python3` (3.9) before
+    Homebrew's. None when there is none."""
+    names = ["python3.%d" % m for m in range(30, MIN_VERSION[1] - 1, -1)]
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        for n in names:
+            p = os.path.join(d or ".", n)
+            if os.path.isfile(p) and os.access(p, os.X_OK):
+                return p
+    return None
+
+
+def _reexec_newer():
+    """Run this script again under a newer Python when this one is too old and one is on PATH
+    (`_newer_python`); returns only when it cannot. Before anything is read, so the newer
+    interpreter gets the same stdin."""
+    if sys.version_info >= MIN_VERSION or os.name == "nt" or os.environ.get("TE_REEXEC"):
+        return
+    py = _newer_python()
+    if py:
+        os.environ["TE_REEXEC"] = "1"
+        try:
+            os.execv(py, [py, os.path.abspath(__file__)] + sys.argv[1:])
+        except OSError:
+            pass
+
+
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "hook"
     rest = sys.argv[2:]
@@ -175,4 +203,5 @@ def main():
 
 
 if __name__ == "__main__":
+    _reexec_newer()
     sys.exit(main())
